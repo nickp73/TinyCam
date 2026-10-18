@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Controls as QQC
 import QtMultimedia
 import Quickshell
 import qs.Commons
@@ -12,7 +11,7 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
-  property int activeTab: 0 // 0: Gimbal & Focus, 1: Color & Kelvin, 2: Exposure & HDR
+  property int activeTab: 0
   property bool showGrid: true
 
   readonly property var cam: hostWidget ? hostWidget.camService : null
@@ -32,7 +31,6 @@ Panel {
     return false
   }
 
-  // Throttle XY pad drags to ~30 Hz for smooth gimbal movement
   Timer {
     id: gimbalThrottle
     interval: 33
@@ -50,6 +48,83 @@ Panel {
     if (!gimbalThrottle.running) gimbalThrottle.start()
   }
 
+  // Reusable pure-QML Slider component (zero QtQuick.Controls dependency)
+  component StudioSlider: Column {
+    id: sliderRoot
+    width: parent.width
+    spacing: 4
+    property string label: ""
+    property real minVal: 0
+    property real maxVal: 100
+    property real stepVal: 1
+    property real currentVal: 50
+    signal valueEdited(int newVal)
+
+    Text {
+      text: sliderRoot.label + ": " + Math.round(sliderRoot.currentVal)
+      color: root.barForeground
+      font.pixelSize: 12
+    }
+
+    Rectangle {
+      id: track
+      width: parent.width
+      height: 18
+      radius: 9
+      color: "#181825"
+      border.color: "#45475a"
+      border.width: 1
+
+      Rectangle {
+        width: {
+          let ratio = (sliderRoot.currentVal - sliderRoot.minVal) / Math.max(1, (sliderRoot.maxVal - sliderRoot.minVal))
+          return Math.max(14, Math.min(track.width, ratio * track.width))
+        }
+        height: parent.height
+        radius: 9
+        color: "#3b82f6"
+      }
+
+      MouseArea {
+        anchors.fill: parent
+        function updateVal(mx) {
+          let ratio = Math.max(0, Math.min(1, mx / track.width))
+          let raw = sliderRoot.minVal + ratio * (sliderRoot.maxVal - sliderRoot.minVal)
+          let stepped = Math.round(raw / sliderRoot.stepVal) * sliderRoot.stepVal
+          sliderRoot.valueEdited(stepped)
+        }
+        onPressed: function(mouse) { updateVal(mouse.x) }
+        onPositionChanged: function(mouse) { if (pressed) updateVal(mouse.x) }
+      }
+    }
+  }
+
+  // Reusable pure-QML Button pill
+  component StudioButton: Rectangle {
+    id: btnRoot
+    height: 30
+    radius: 6
+    property string text: ""
+    property bool active: false
+    signal clicked()
+    color: btnMouse.pressed ? "#2563eb" : (active ? "#3b82f6" : "#313244")
+    border.color: active ? "#89b4fa" : "#45475a"
+    border.width: 1
+
+    Text {
+      anchors.centerIn: parent
+      text: btnRoot.text
+      color: "#cdd6f4"
+      font.pixelSize: 12
+      font.bold: btnRoot.active
+    }
+    MouseArea {
+      id: btnMouse
+      anchors.fill: parent
+      onClicked: btnRoot.clicked()
+    }
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -57,7 +132,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(440)
+    contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -74,7 +149,7 @@ Panel {
         // 1. Header Bar
         Row {
           width: parent.width
-          spacing: Style.space(8)
+          spacing: 8
 
           Text {
             text: "📷 TinyCam Studio"
@@ -82,43 +157,18 @@ Panel {
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.subtitle
             font.bold: true
-            anchors.verticalCenter: parent.verticalCenter
           }
 
-          Rectangle {
-            width: 96
-            height: 22
-            radius: 11
-            color: root.cam && root.cam.isReady ? "#1e3a2f" : "#3a1e28"
-            anchors.verticalCenter: parent.verticalCenter
-            Text {
-              anchors.centerIn: parent
-              text: root.cam && root.cam.isReady ? "● Tiny 2 Lite" : "○ Offline"
-              color: root.cam && root.cam.isReady ? "#a6e3a1" : "#f38ba8"
-              font.pixelSize: 11
-            }
-          }
-
-          Rectangle {
-            width: 72
+          StudioButton {
+            width: 80
             height: 24
-            radius: 6
-            color: root.showGrid ? "#3b82f6" : "#313244"
-            anchors.verticalCenter: parent.verticalCenter
-            Text {
-              anchors.centerIn: parent
-              text: root.showGrid ? "Grid: ON" : "Grid: OFF"
-              color: "#cdd6f4"
-              font.pixelSize: 11
-            }
-            MouseArea {
-              anchors.fill: parent
-              onClicked: root.showGrid = !root.showGrid
-            }
+            text: root.showGrid ? "Grid: ON" : "Grid: OFF"
+            active: root.showGrid
+            onClicked: root.showGrid = !root.showGrid
           }
         }
 
-        // 2. Live 16:9 Viewfinder (Releases /dev/video0 when closed)
+        // 2. Live 16:9 Viewfinder
         Rectangle {
           width: parent.width
           height: Math.round(parent.width * 9 / 16)
@@ -134,18 +184,6 @@ Panel {
             camera: Camera {
               id: camDevice
               active: root.opened
-              onActiveChanged: {
-                if (active) {
-                  let formats = camDevice.cameraDevice.videoFormats
-                  for (let i = 0; i < formats.length; i++) {
-                    let f = formats[i]
-                    if (f.resolution.width === 1280 && f.resolution.height === 720 && f.maxFrameRate >= 30) {
-                      camDevice.cameraFormat = f
-                      break
-                    }
-                  }
-                }
-              }
             }
             videoOutput: viewfinder
           }
@@ -156,7 +194,6 @@ Panel {
             fillMode: VideoOutput.PreserveAspectFit
           }
 
-          // Rule-of-Thirds Framing Overlay
           Item {
             anchors.fill: parent
             visible: root.showGrid
@@ -172,65 +209,50 @@ Panel {
           width: parent.width
           spacing: 6
 
-          Repeater {
-            model: [
-              { label: "Face", preset: "Face Center" },
-              { label: "Desk", preset: "Desk View" },
-              { label: "Wide", preset: "Wide Room" },
-              { label: "💤 Stow", preset: "Privacy Sleep" }
-            ]
-            delegate: Rectangle {
-              width: (content.width - 18) / 4
-              height: 30
-              radius: 6
-              color: presetMouse.pressed ? "#3b82f6" : "#313244"
-              border.color: "#45475a"
-              border.width: 1
-              required property var modelData
-              Text {
-                anchors.centerIn: parent
-                text: parent.modelData.label
-                color: "#cdd6f4"
-                font.pixelSize: 12
-                font.bold: true
-              }
-              MouseArea {
-                id: presetMouse
-                anchors.fill: parent
-                onClicked: if (root.cam) root.cam.applyPreset(parent.modelData.preset)
-              }
-            }
+          StudioButton {
+            width: (parent.width - 18) / 4
+            text: "Face"
+            onClicked: if (root.cam) root.cam.applyPreset("Face Center")
+          }
+          StudioButton {
+            width: (parent.width - 18) / 4
+            text: "Desk"
+            onClicked: if (root.cam) root.cam.applyPreset("Desk View")
+          }
+          StudioButton {
+            width: (parent.width - 18) / 4
+            text: "Wide"
+            onClicked: if (root.cam) root.cam.applyPreset("Wide Room")
+          }
+          StudioButton {
+            width: (parent.width - 18) / 4
+            text: "💤 Stow"
+            onClicked: if (root.cam) root.cam.applyPreset("Privacy Sleep")
           }
         }
 
-        // 4. Studio Navigation Tabs (Custom pills - zero property conflict)
+        // 4. Studio Navigation Tabs
         Row {
           width: parent.width
           spacing: 6
 
-          Repeater {
-            model: ["Gimbal & Focus", "Color & Kelvin", "Exposure & HDR"]
-            delegate: Rectangle {
-              width: (content.width - 12) / 3
-              height: 28
-              radius: 6
-              required property int index
-              required property string modelData
-              color: root.activeTab === index ? "#3b82f6" : "#1e1e2e"
-              border.color: root.activeTab === index ? "#89b4fa" : "#45475a"
-              border.width: 1
-              Text {
-                anchors.centerIn: parent
-                text: parent.modelData
-                color: "#cdd6f4"
-                font.pixelSize: 11
-                font.bold: root.activeTab === parent.index
-              }
-              MouseArea {
-                anchors.fill: parent
-                onClicked: root.activeTab = parent.index
-              }
-            }
+          StudioButton {
+            width: (parent.width - 12) / 3
+            text: "Gimbal & Focus"
+            active: root.activeTab === 0
+            onClicked: root.activeTab = 0
+          }
+          StudioButton {
+            width: (parent.width - 12) / 3
+            text: "Color & Kelvin"
+            active: root.activeTab === 1
+            onClicked: root.activeTab = 1
+          }
+          StudioButton {
+            width: (parent.width - 12) / 3
+            text: "Exposure & HDR"
+            active: root.activeTab === 2
+            onClicked: root.activeTab = 2
           }
         }
 
@@ -246,11 +268,10 @@ Panel {
             width: parent.width
             spacing: 12
 
-            // Interactive 2D XY Gimbal Pad
             Rectangle {
               id: xyPad
-              width: 170
-              height: 140
+              width: 160
+              height: 130
               radius: 8
               color: "#181825"
               border.color: "#45475a"
@@ -261,9 +282,9 @@ Panel {
 
               Rectangle {
                 id: puck
-                width: 18
-                height: 18
-                radius: 9
+                width: 16
+                height: 16
+                radius: 8
                 color: "#89b4fa"
                 border.color: "#ffffff"
                 border.width: 2
@@ -295,106 +316,69 @@ Panel {
               }
             }
 
-            // Nudge D-Pad & Coordinates Readout
             Column {
-              width: parent.width - 182
+              width: parent.width - 172
               spacing: 6
 
               Text {
                 text: {
                   let p = root.cam && root.cam.state ? Math.round((root.cam.state.pan_absolute || 0) / 3600) : 0
                   let t = root.cam && root.cam.state ? Math.round((root.cam.state.tilt_absolute || 0) / 3600) : 0
-                  return "Pan: " + p + "°  |  Tilt: " + t + "°"
+                  return "Pan: " + p + "° | Tilt: " + t + "°"
                 }
                 color: root.barForeground
                 font.pixelSize: 12
                 font.bold: true
               }
 
-              Text {
-                text: "Drag pad or double-click to center"
-                color: "#a6adc8"
-                font.pixelSize: 11
-              }
-
               Row {
                 spacing: 4
-                Repeater {
-                  model: [
-                    { lbl: "◀", ctrl: "pan_absolute", step: -18000 },
-                    { lbl: "▲", ctrl: "tilt_absolute", step: 18000 },
-                    { lbl: "▼", ctrl: "tilt_absolute", step: -18000 },
-                    { lbl: "▶", ctrl: "pan_absolute", step: 18000 }
-                  ]
-                  delegate: Rectangle {
-                    width: 40; height: 28; radius: 6; color: "#313244"
-                    required property var modelData
-                    Text { anchors.centerIn: parent; text: parent.modelData.lbl; color: "#cdd6f4"; font.pixelSize: 12 }
-                    MouseArea {
-                      anchors.fill: parent
-                      onClicked: {
-                        if (root.cam) {
-                          let cur = root.cam.state[parent.modelData.ctrl] || 0
-                          root.cam.setControl(parent.modelData.ctrl, cur + parent.modelData.step)
-                        }
-                      }
-                    }
-                  }
+                StudioButton {
+                  width: 36; text: "◀"
+                  onClicked: if (root.cam) root.cam.setControl("pan_absolute", (root.cam.state.pan_absolute || 0) - 18000)
+                }
+                StudioButton {
+                  width: 36; text: "▲"
+                  onClicked: if (root.cam) root.cam.setControl("tilt_absolute", (root.cam.state.tilt_absolute || 0) + 18000)
+                }
+                StudioButton {
+                  width: 36; text: "▼"
+                  onClicked: if (root.cam) root.cam.setControl("tilt_absolute", (root.cam.state.tilt_absolute || 0) - 18000)
+                }
+                StudioButton {
+                  width: 36; text: "▶"
+                  onClicked: if (root.cam) root.cam.setControl("pan_absolute", (root.cam.state.pan_absolute || 0) + 18000)
                 }
               }
 
-              Rectangle {
-                width: parent.width; height: 28; radius: 6; color: "#313244"
-                Text { anchors.centerIn: parent; text: "Reset Center (0°, 0°)"; color: "#cdd6f4"; font.pixelSize: 12 }
-                MouseArea {
-                  anchors.fill: parent
-                  onClicked: if (root.cam) root.cam.setPanTilt(0, 0)
-                }
+              StudioButton {
+                width: parent.width
+                text: "Center (0°, 0°)"
+                onClicked: if (root.cam) root.cam.setPanTilt(0, 0)
               }
             }
           }
 
-          // Digital Zoom Slider
-          Column {
-            width: parent.width
-            spacing: 2
-            Text {
-              text: "Digital Zoom: " + (root.cam && root.cam.state ? (root.cam.state.zoom_absolute || 0) : 0) + "%"
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width
-              from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.zoom_absolute || 0) : 0
-              onMoved: if (root.cam) root.cam.setControl("zoom_absolute", value)
-            }
+          StudioSlider {
+            label: "Digital Zoom (%)"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.zoom_absolute || 0) : 0
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("zoom_absolute", v) }
           }
 
-          // Auto / Manual Focus Controls
-          QQC.CheckBox {
-            id: afCheck
-            text: "Continuous Autofocus"
-            checked: root.cam && root.cam.state ? (root.cam.state.focus_automatic_continuous === 1) : true
-            onToggled: if (root.cam) root.cam.setControl("focus_automatic_continuous", checked ? 1 : 0)
+          StudioButton {
+            width: parent.width
+            property bool afOn: root.cam && root.cam.state ? (root.cam.state.focus_automatic_continuous === 1) : true
+            text: afOn ? "Autofocus: ON (Click for Manual)" : "Autofocus: OFF (Manual Mode)"
+            active: afOn
+            onClicked: if (root.cam) root.cam.setControl("focus_automatic_continuous", afOn ? 0 : 1)
           }
 
-          Column {
-            width: parent.width
-            spacing: 2
-            opacity: afCheck.checked ? 0.4 : 1.0
-            enabled: !afCheck.checked
-            Text {
-              text: "Manual Focus Distance: " + (root.cam && root.cam.state ? (root.cam.state.focus_absolute || 0) : 0)
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width
-              from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.focus_absolute || 37) : 37
-              onMoved: if (root.cam) root.cam.setControl("focus_absolute", value)
-            }
+          StudioSlider {
+            label: "Manual Focus"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.focus_absolute || 37) : 37
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("focus_absolute", v) }
           }
         }
 
@@ -403,72 +387,50 @@ Panel {
         // ==========================================
         Column {
           width: parent.width
-          spacing: 6
+          spacing: 8
           visible: root.activeTab === 1
 
-          QQC.CheckBox {
-            id: awbCheck
-            text: "Auto White Balance (AWB)"
-            checked: root.cam && root.cam.state ? (root.cam.state.white_balance_automatic === 1) : false
-            onToggled: if (root.cam) root.cam.setControl("white_balance_automatic", checked ? 1 : 0)
-          }
-
-          Column {
+          StudioButton {
             width: parent.width
-            spacing: 2
-            opacity: awbCheck.checked ? 0.4 : 1.0
-            enabled: !awbCheck.checked
-            Text {
-              text: "Color Temperature: " + (root.cam && root.cam.state ? (root.cam.state.white_balance_temperature || 5000) : 5000) + " K"
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width
-              from: 2000; to: 10000; stepSize: 100
-              value: root.cam && root.cam.state ? (root.cam.state.white_balance_temperature || 5000) : 5000
-              onMoved: if (root.cam) root.cam.setControl("white_balance_temperature", value)
-            }
+            property bool awbOn: root.cam && root.cam.state ? (root.cam.state.white_balance_automatic === 1) : false
+            text: awbOn ? "Auto White Balance: ON" : "Auto White Balance: OFF (Manual Kelvin)"
+            active: awbOn
+            onClicked: if (root.cam) root.cam.setControl("white_balance_automatic", awbOn ? 0 : 1)
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text { text: "Brightness: " + (root.cam && root.cam.state ? (root.cam.state.brightness || 32) : 32); color: root.barForeground; font.pixelSize: 12 }
-            QQC.Slider {
-              width: parent.width; from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.brightness || 32) : 32
-              onMoved: if (root.cam) root.cam.setControl("brightness", value)
-            }
+          StudioSlider {
+            label: "White Balance (K)"
+            minVal: 2000; maxVal: 10000; stepVal: 100
+            currentVal: root.cam && root.cam.state ? (root.cam.state.white_balance_temperature || 5000) : 5000
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("white_balance_temperature", v) }
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text { text: "Contrast: " + (root.cam && root.cam.state ? (root.cam.state.contrast || 53) : 53); color: root.barForeground; font.pixelSize: 12 }
-            QQC.Slider {
-              width: parent.width; from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.contrast || 53) : 53
-              onMoved: if (root.cam) root.cam.setControl("contrast", value)
-            }
+          StudioSlider {
+            label: "Brightness"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.brightness || 32) : 32
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("brightness", v) }
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text { text: "Saturation: " + (root.cam && root.cam.state ? (root.cam.state.saturation || 69) : 69); color: root.barForeground; font.pixelSize: 12 }
-            QQC.Slider {
-              width: parent.width; from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.saturation || 69) : 69
-              onMoved: if (root.cam) root.cam.setControl("saturation", value)
-            }
+          StudioSlider {
+            label: "Contrast"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.contrast || 53) : 53
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("contrast", v) }
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text { text: "Sharpness: " + (root.cam && root.cam.state ? (root.cam.state.sharpness || 44) : 44); color: root.barForeground; font.pixelSize: 12 }
-            QQC.Slider {
-              width: parent.width; from: 0; to: 100
-              value: root.cam && root.cam.state ? (root.cam.state.sharpness || 44) : 44
-              onMoved: if (root.cam) root.cam.setControl("sharpness", value)
-            }
+          StudioSlider {
+            label: "Saturation"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.saturation || 69) : 69
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("saturation", v) }
+          }
+
+          StudioSlider {
+            label: "Sharpness"
+            minVal: 0; maxVal: 100; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.sharpness || 44) : 44
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("sharpness", v) }
           }
         }
 
@@ -477,60 +439,36 @@ Panel {
         // ==========================================
         Column {
           width: parent.width
-          spacing: 6
+          spacing: 8
           visible: root.activeTab === 2
 
-          QQC.CheckBox {
-            id: aeCheck
-            text: "Auto Exposure"
-            checked: root.cam && root.cam.state ? (root.cam.state.auto_exposure === 0) : true
-            onToggled: if (root.cam) root.cam.setControl("auto_exposure", checked ? 0 : 1)
-          }
-
-          Column {
+          StudioButton {
             width: parent.width
-            spacing: 2
-            opacity: aeCheck.checked ? 0.4 : 1.0
-            enabled: !aeCheck.checked
-            Text {
-              text: "Manual Shutter / Exposure Time: " + (root.cam && root.cam.state ? (root.cam.state.exposure_time_absolute || 330) : 330)
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width
-              from: 1; to: 2500
-              value: root.cam && root.cam.state ? (root.cam.state.exposure_time_absolute || 330) : 330
-              onMoved: if (root.cam) root.cam.setControl("exposure_time_absolute", value)
-            }
+            property bool aeOn: root.cam && root.cam.state ? (root.cam.state.auto_exposure === 0) : true
+            text: aeOn ? "Auto Exposure: ON" : "Auto Exposure: OFF (Manual Shutter)"
+            active: aeOn
+            onClicked: if (root.cam) root.cam.setControl("auto_exposure", aeOn ? 1 : 0)
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text {
-              text: "Sensor Gain (ISO): " + (root.cam && root.cam.state ? (root.cam.state.gain || 20) : 20)
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width; from: 1; to: 64
-              value: root.cam && root.cam.state ? (root.cam.state.gain || 20) : 20
-              onMoved: if (root.cam) root.cam.setControl("gain", value)
-            }
+          StudioSlider {
+            label: "Shutter / Exposure Time"
+            minVal: 1; maxVal: 2500; stepVal: 10
+            currentVal: root.cam && root.cam.state ? (root.cam.state.exposure_time_absolute || 330) : 330
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("exposure_time_absolute", v) }
           }
 
-          Column {
-            width: parent.width; spacing: 2
-            Text {
-              text: "Backlight Compensation (HDR): " + (root.cam && root.cam.state ? (root.cam.state.backlight_compensation || 11) : 11)
-              color: root.barForeground
-              font.pixelSize: 12
-            }
-            QQC.Slider {
-              width: parent.width; from: 0; to: 18; stepSize: 1
-              value: root.cam && root.cam.state ? (root.cam.state.backlight_compensation || 11) : 11
-              onMoved: if (root.cam) root.cam.setControl("backlight_compensation", value)
-            }
+          StudioSlider {
+            label: "Sensor Gain (ISO)"
+            minVal: 1; maxVal: 64; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.gain || 20) : 20
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("gain", v) }
+          }
+
+          StudioSlider {
+            label: "Backlight Compensation (HDR)"
+            minVal: 0; maxVal: 18; stepVal: 1
+            currentVal: root.cam && root.cam.state ? (root.cam.state.backlight_compensation || 11) : 11
+            onValueEdited: function(v) { if (root.cam) root.cam.setControl("backlight_compensation", v) }
           }
         }
       }
