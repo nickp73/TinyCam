@@ -1,47 +1,52 @@
 import QtQuick
-import Quickshell
 import qs.Ui
 
 BarWidget {
   id: root
   moduleName: "io.github.nickp73.tinycam"
 
-  property var camService: CameraService {}
+  property var camService: CameraService {
+    preferredDevice: String(root.setting("device", ""))
+  }
 
-  readonly property bool opened: panelLoader.item
-    ? panelLoader.item.opened === true
+  readonly property var loadedPanel: panelLoader.item
+
+  readonly property bool opened: root.loadedPanel
+    ? root.loadedPanel.opened === true
     : false
-  readonly property bool popoutSwitchClosing: panelLoader.item
-    ? panelLoader.item.popoutSwitchClosing === true
+  readonly property bool popoutSwitchClosing: root.loadedPanel
+    ? root.loadedPanel.popoutSwitchClosing === true
     : false
 
   function open() {
-    if (panelLoader.item) panelLoader.item.open()
+    if (root.loadedPanel) root.loadedPanel.open()
   }
 
   function close() {
-    if (panelLoader.item) panelLoader.item.close()
+    if (root.loadedPanel) root.loadedPanel.close()
   }
 
   function toggle() {
-    if (panelLoader.item) panelLoader.item.toggle()
+    if (root.loadedPanel) root.loadedPanel.toggle()
   }
 
   function closeForPopoutSwitch() {
-    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+    if (root.loadedPanel) root.loadedPanel.closeForPopoutSwitch()
   }
 
   function injectPanel() {
-    if (!panelLoader.item) return
-    panelLoader.item.bar = root.bar
-    panelLoader.item.anchorItem = button
-    panelLoader.item.hostWidget = root
+    if (!root.loadedPanel) return
+    root.loadedPanel.bar = root.bar
+    root.loadedPanel.anchorItem = button
+    root.loadedPanel.hostWidget = root
+    root.loadedPanel.settings = root.settings
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onBarChanged: injectPanel()
+  onSettingsChanged: injectPanel()
 
   Loader {
     id: panelLoader
@@ -59,7 +64,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "📷"
-    tooltipText: "Open TinyCam Studio"
+    tooltipText: root.camService.errorMessage || (root.camService.isReady ? "Open TinyCam Studio" : "Waiting for OBSBOT camera")
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.LeftButton) root.toggle()
     }

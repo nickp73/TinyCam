@@ -3,11 +3,14 @@
 TinyCam Studio Persistent Daemon for OBSBOT Tiny 2 Lite (3564:fef9)
 Supports PTZ Gimbal XY, Presets, Optics (Focus/Zoom), Exposure, and Color/Kelvin.
 """
+import argparse
 import ctypes
+import errno
 import fcntl
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 VIDIOC_G_CTRL = 0xC008561B
@@ -38,7 +41,9 @@ CTRLS = {
 class V4L2Control(ctypes.Structure):
     _fields_ = [("id", ctypes.c_uint32), ("value", ctypes.c_int32)]
 
-CONFIG_PATH = Path.home() / ".config" / "tinycam" / "presets.json"
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "tinycam" / "presets.json"
+USB_ID = ("3564", "fef9")
+DISCONNECT_ERRORS = {errno.ENODEV, errno.ENXIO, errno.EIO, errno.EBADF}
 
 DEFAULT_PRESETS = {
     "Face Center": {"pan_absolute": 0, "tilt_absolute": 0, "zoom_absolute": 0},
@@ -47,21 +52,91 @@ DEFAULT_PRESETS = {
     "Privacy Sleep": {"pan_absolute": 0, "tilt_absolute": -288000, "zoom_absolute": 0},
 }
 
+def find_device(preferred="", sysfs=Path("/sys/class/video4linux"), dev_root=Path("/dev")):
+    """Select the OBSBOT's primary video node, never an unrelated default camera."""
+    matches = []
+    for node in sysfs.glob("video*"):
+        try:
+            if (node / "index").read_text().strip() != "0":
+                continue
+            for parent in node.resolve().parents:
+                if (parent / "idVendor").exists():
+                    identity = ((parent / "idVendor").read_text().strip().lower(),
+                                (parent / "idProduct").read_text().strip().lower())
+                    if identity == USB_ID:
+                        matches.append((dev_root / node.name).resolve())
+                    break
+        except OSError:
+            continue  # The device may have disappeared during enumeration.
+    if preferred:
+        selected = Path(preferred).resolve()
+        if selected not in matches:
+            raise FileNotFoundError("Selected device is not an available OBSBOT Tiny 2 Lite video input")
+        return str(selected)
+    if not matches:
+        raise FileNotFoundError("OBSBOT Tiny 2 Lite not connected")
+    if len(matches) > 1:
+        raise ValueError("Multiple OBSBOT cameras found; set the widget's device to a /dev/v4l/by-id/ path")
+    return str(matches[0])
+
+
+def read_presets(path):
+    if not path.exists():
+        return {}
+    presets = json.loads(path.read_text())
+    if not isinstance(presets, dict) or any(
+        not isinstance(values, dict) or any(
+            key not in CTRLS or type(value) is not int for key, value in values.items()
+        ) for values in presets.values()
+    ):
+        raise ValueError("Invalid presets file; existing file has been preserved")
+    return presets
+
+
+def write_presets(path, presets):
+    """Replace atomically, so an interrupted write cannot truncate saved presets."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(presets, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class ObsbotDaemon:
-    def __init__(self, device="/dev/video0"):
-        self.fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        self._sync_defaults()
+    def __init__(self, device="", config_path=None):
+        self.preferred_device = device
+        self.device = ""
+        self.fd = None
+        self.config_path = CONFIG_PATH if config_path is None else Path(config_path)
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+        self.fd = None
+        self.device = ""
+
+    def connect(self):
+        if self.fd is None:
+            device = find_device(self.preferred_device)
+            self.fd = os.open(device, os.O_RDWR | os.O_NONBLOCK)
+            self.device = device
+        # A control read also detects unplugging while the descriptor is open.
+        self.get_ctrl("pan_absolute")
 
     def _sync_defaults(self):
-        presets = {}
-        if CONFIG_PATH.exists():
-            try:
-                presets = json.loads(CONFIG_PATH.read_text())
-            except Exception:
-                presets = {}
-        presets.update(DEFAULT_PRESETS)
-        CONFIG_PATH.write_text(json.dumps(presets, indent=2))
+        presets = read_presets(self.config_path)
+        merged = {**DEFAULT_PRESETS, **presets}
+        if merged != presets:
+            write_presets(self.config_path, merged)
+        return merged
 
     def get_ctrl(self, name: str) -> int:
         ctrl = V4L2Control(id=CTRLS[name], value=0)
@@ -70,7 +145,7 @@ class ObsbotDaemon:
 
     def set_ctrl(self, name: str, value: int):
         if name not in CTRLS:
-            return
+            raise ValueError(f"Unknown camera control: {name}")
         if name in ("pan_absolute", "tilt_absolute"):
             value = int(round(value / 3600.0) * 3600)
         elif name == "white_balance_temperature":
@@ -83,54 +158,77 @@ class ObsbotDaemon:
         for name in CTRLS:
             try:
                 state[name] = self.get_ctrl(name)
-            except OSError:
-                pass
+            except OSError as error:
+                if error.errno in DISCONNECT_ERRORS:
+                    raise
+                # Unsupported controls are omitted rather than given fake values.
         return state
 
     def apply_preset(self, name: str):
-        presets = json.loads(CONFIG_PATH.read_text())
-        if name in presets:
-            for k, v in presets[name].items():
-                try:
-                    self.set_ctrl(k, v)
-                except OSError:
-                    pass
+        presets = self._sync_defaults()
+        if name not in presets:
+            raise ValueError(f"Unknown preset: {name}")
+        for key, value in presets[name].items():
+            self.set_ctrl(key, value)
 
     def save_preset(self, name: str):
-        presets = json.loads(CONFIG_PATH.read_text())
-        presets[name] = {
-            "pan_absolute": self.get_ctrl("pan_absolute"),
-            "tilt_absolute": self.get_ctrl("tilt_absolute"),
-            "zoom_absolute": self.get_ctrl("zoom_absolute"),
-        }
-        CONFIG_PATH.write_text(json.dumps(presets, indent=2))
+        presets = self._sync_defaults()
+        presets[name] = {key: self.get_ctrl(key) for key in
+                         ("pan_absolute", "tilt_absolute", "zoom_absolute")}
+        write_presets(self.config_path, presets)
+
+    def handle_command(self, cmd):
+        try:
+            self.connect()
+            action = cmd.get("action")
+            if action == "set":
+                self.set_ctrl(cmd["ctrl"], cmd["value"])
+            elif action == "set_pt":
+                self.set_ctrl("pan_absolute", cmd["pan"])
+                self.set_ctrl("tilt_absolute", cmd["tilt"])
+            elif action == "preset_apply":
+                self.apply_preset(cmd["name"])
+            elif action == "preset_save":
+                self.save_preset(cmd["name"])
+            elif action != "sync":
+                raise ValueError(f"Unknown action: {action}")
+            return {"status": "ok", "connected": True, "device": self.device,
+                    "state": self.get_all_state(), "action": action}
+        except Exception as error:
+            state = {}
+            # Re-read after failure: a two-control operation may have partly succeeded.
+            if self.fd is not None:
+                try:
+                    self.get_ctrl("pan_absolute")
+                    state = self.get_all_state()
+                except OSError:
+                    self.close()
+            return {"status": "error", "message": str(error),
+                    "connected": self.fd is not None, "device": self.device, "state": state}
 
     def run(self):
-        print(json.dumps({"status": "ready", "state": self.get_all_state()}), flush=True)
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                cmd = json.loads(line)
-                action = cmd.get("action")
-                if action == "set":
-                    self.set_ctrl(cmd["ctrl"], cmd["value"])
-                elif action == "set_pt":
-                    self.set_ctrl("pan_absolute", cmd["pan"])
-                    self.set_ctrl("tilt_absolute", cmd["tilt"])
-                elif action == "preset_apply":
-                    self.apply_preset(cmd["name"])
-                    print(json.dumps({"status": "ok", "state": self.get_all_state()}), flush=True)
+        def emit(message):
+            print(json.dumps(message), flush=True)
+
+        try:
+            emit(self.handle_command({"action": "sync"}))
+            for line in sys.stdin:
+                if not line.strip():
                     continue
-                elif action == "preset_save":
-                    self.save_preset(cmd["name"])
-                elif action == "sync":
-                    print(json.dumps({"status": "ok", "state": self.get_all_state()}), flush=True)
+                try:
+                    cmd = json.loads(line)
+                    if not isinstance(cmd, dict):
+                        raise ValueError("Command must be a JSON object")
+                except (ValueError, TypeError) as error:
+                    emit({"status": "error", "message": str(error)})
                     continue
-                print(json.dumps({"status": "ok"}), flush=True)
-            except Exception as e:
-                print(json.dumps({"status": "error", "message": str(e)}), flush=True)
+                emit(self.handle_command(cmd))
+        finally:
+            self.close()
+
 
 if __name__ == "__main__":
-    ObsbotDaemon().run()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", default="", help="OBSBOT video device (prefer /dev/v4l/by-id/)")
+    args = parser.parse_args()
+    ObsbotDaemon(args.device).run()
