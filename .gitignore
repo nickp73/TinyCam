@@ -1,0 +1,72 @@
+### Python template
+# ==========================================
+# 1. JetBrains IDEs (PyCharm, CLion, etc.)
+# ==========================================
+.idea/
+*.iws
+*.iml
+*.ipr
+cmake-build-*/
+out/
+
+# ==========================================
+# 2. Python Bytecode & Virtual Environments
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging & Distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+
+# Testing, Linting & Type Checking Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# 3. QML, Qt & Quickshell Artifacts
+# ==========================================
+# Compiled QML cache files
+*.qmlc
+*.jsc
+*.qrc.cpp
+
+# Qt Creator / Qt Design Studio user files
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.CMakeLists.txt.user
+.qmlls.ini
+
+# ==========================================
+# 4. Environment Secrets & OS Noise
+# ==========================================
+.env
+.env.local
+*.log
+
+# Linux / Editor temporary files
+*~
+.directory
+.Trash-*
+*.swp
+*.libdev.so 
+*.libdev.so.1 
+*.libdev.so.1.0.0 
+*.libdev.so.1.0.3 
+*.libtinycam_sdk.so
